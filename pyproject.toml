@@ -1,0 +1,18 @@
+[project]
+name = "remnd"
+version = "0.1.0"
+description = "A python CLI reminder tool."
+authors = [
+    {name = "Benjamin Walker",email = "mail@benwalker.co.uk"}
+]
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+]
+
+[project.scripts]
+remnd = "remnd.cli:main"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
