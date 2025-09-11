@@ -1,2 +1,2 @@
-# wayremind
+# rmnd
 A python CLI reminder tool.
