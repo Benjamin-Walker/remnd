@@ -12,10 +12,11 @@ DB_PATH = APP_DIR / "remnd.sqlite3"
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS reminders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT,
-    message TEXT NOT NULL,
+    title TEXT NOT NULL,
+    note TEXT,
     due_at INTEGER NOT NULL,    -- epoch seconds (UTC)
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    completed_at INTEGER        -- NULL if not completed, else epoch seconds (UTC)
 );
 CREATE INDEX IF NOT EXISTS idx_due_at ON reminders(due_at);
 """
@@ -36,18 +37,44 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
-def add_reminder(*, title: str | None, message: str, due_at: int) -> int:
+def add_reminder(*, title: str, note: str | None, due_at: int) -> int:
     now = int(time.time())
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO reminders(title, message, due_at, created_at) VALUES(?,?,?,?)",
-            (title, message, due_at, now),
+            "INSERT INTO reminders(title, note, due_at, created_at) VALUES(?,?,?,?)",
+            (title, note, due_at, now),
         )
         return int(cur.lastrowid)
 
 
-def list_reminders():
+def list_reminders(*, include_done: bool = False):
     with connect() as conn:
-        return list(
-            conn.execute("SELECT * FROM reminders ORDER BY due_at ASC, id ASC")
+        if include_done:
+            # Show everything, done first by completion time, then due_at
+            return list(conn.execute(
+                "SELECT * FROM reminders ORDER BY "
+                "CASE WHEN completed_at IS NULL THEN 0 ELSE 1 END, "
+                "due_at ASC, id ASC"
+            ))
+        # Default: only active (not completed)
+        return list(conn.execute(
+            "SELECT * FROM reminders "
+            "WHERE completed_at IS NULL "
+            "ORDER BY due_at ASC, id ASC"
+        ))
+
+
+def mark_complete(reminder_id: int) -> bool:
+    now = int(time.time())
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE reminders SET completed_at=? WHERE id=? AND completed_at IS NULL",
+            (now, reminder_id),
         )
+        return cur.rowcount > 0
+
+
+def delete_reminder(reminder_id: int) -> bool:
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM reminders WHERE id=?", (reminder_id,))
+        return cur.rowcount > 0
