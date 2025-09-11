@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS reminders (
     note TEXT,
     due_at INTEGER NOT NULL,    -- epoch seconds (UTC)
     created_at INTEGER NOT NULL,
+    notified_at INTEGER,
     completed_at INTEGER        -- NULL if not completed, else epoch seconds (UTC)
 );
 CREATE INDEX IF NOT EXISTS idx_due_at ON reminders(due_at);
@@ -78,3 +79,31 @@ def delete_reminder(reminder_id: int) -> bool:
     with connect() as conn:
         cur = conn.execute("DELETE FROM reminders WHERE id=?", (reminder_id,))
         return cur.rowcount > 0
+
+
+def due_unnotified(limit: int = 100):
+    """Active reminders that are due and have not been notified yet."""
+    now = int(time.time())
+    with connect() as conn:
+        return list(conn.execute(
+            "SELECT * FROM reminders "
+            "WHERE completed_at IS NULL "
+            "  AND due_at <= ? "
+            "  AND (notified_at IS NULL OR notified_at = 0) "
+            "ORDER BY due_at ASC, id ASC "
+            "LIMIT ?",
+            (now, limit),
+        ))
+
+
+def mark_notified(reminder_id: int) -> bool:
+    now = int(time.time())
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE reminders "
+            "SET notified_at = ? "
+            "WHERE id = ? AND (notified_at IS NULL OR notified_at = 0)",
+            (now, reminder_id),
+        )
+        return cur.rowcount > 0
+

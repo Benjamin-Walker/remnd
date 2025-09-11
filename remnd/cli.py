@@ -2,8 +2,74 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import re
+import os
+import shutil
+from pathlib import Path
+import subprocess
+import textwrap
 
-from .storage import add_reminder, delete_reminder, list_reminders, mark_complete
+from .storage import (
+    add_reminder, delete_reminder, list_reminders, mark_complete,
+    due_unnotified, mark_notified,
+)
+
+
+SYSTEMD_DIR = Path.home() / ".config" / "systemd" / "user"
+SERVICE_NAME = "remnd-notify.service"
+TIMER_NAME = "remnd-notify.timer"
+
+
+SERVICE_UNIT = textwrap.dedent(f"""\
+[Unit]
+Description=Send notifications for due remnd reminders
+
+[Service]
+Type=oneshot
+ExecStart={shutil.which("remnd") or "%h/.local/bin/remnd"} notify-due
+""")
+
+
+TIMER_UNIT = """\
+[Unit]
+Description=Check for due remnd reminders every minute
+
+[Timer]
+OnCalendar=*:0/1
+Persistent=true
+Unit=remnd-notify.service
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _systemctl_user(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["systemctl", "--user", *args], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+
+def cmd_install_timer() -> int:
+    SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
+    (SYSTEMD_DIR / SERVICE_NAME).write_text(SERVICE_UNIT)
+    (SYSTEMD_DIR / TIMER_NAME).write_text(TIMER_UNIT)
+
+    _systemctl_user("daemon-reload")
+    _systemctl_user("enable", "--now", TIMER_NAME)
+
+    print("✓ Installed and started remnd timer (checks every minute).")
+    print("  To check status:  systemctl --user status remnd-notify.timer")
+    return 0
+
+
+def cmd_uninstall_timer() -> int:
+    _systemctl_user("disable", "--now", TIMER_NAME)
+    try:
+        (SYSTEMD_DIR / SERVICE_NAME).unlink(missing_ok=True)
+        (SYSTEMD_DIR / TIMER_NAME).unlink(missing_ok=True)
+    except Exception:
+        pass
+    _systemctl_user("daemon-reload")
+    print("✓ Uninstalled remnd timer.")
+    return 0
 
 
 def _parse_duration(spec: str) -> dt.timedelta:
@@ -36,6 +102,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="remnd", description="Simple reminder list (add, list, comp, del).")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    sub.add_parser("notify-due", help="Send desktop notifications for due reminders.")
+    sub.add_parser("install-timer", help="Install and start the systemd user timer.")
+    sub.add_parser("uninstall-timer", help="Disable and remove the systemd user timer.")
+
     p_add = sub.add_parser("add", help="Add a reminder due after a duration.")
     p_add.add_argument("in_", help='Duration like "10m", "1h30m", or number (minutes).')
     p_add.add_argument("title", help="Reminder title.")
@@ -57,7 +127,7 @@ def cmd_add(args) -> int:
     delta = _parse_duration(args.in_)
     due = dt.datetime.now() + delta
     rid = add_reminder(title=args.title, note=args.note, due_at=_to_epoch_utc(due))
-    print(f"added #{rid} @ {due.strftime('%Y-%m-%d %H:%M:%S')}  {args.note}")
+    print(f"added #{rid} @ {due.strftime('%Y-%m-%d %H:%M:%S')}  {args.title}")
     return 0
 
 
@@ -95,6 +165,36 @@ def cmd_del(args) -> int:
     return 1
 
 
+def cmd_notify_due() -> int:
+    rows = due_unnotified()
+    if not rows:
+        return 0
+
+    has_notify = shutil.which("notify-send") is not None
+    for r in rows:
+        title = r["title"] or "Reminder"
+        note = r["note"] or ""
+        due_local = dt.datetime.fromtimestamp(int(r["due_at"])).strftime("%Y-%m-%d %H:%M")
+        body = note if note else f"Due: {due_local}"
+
+        if has_notify:
+            # Send a transient, non-stacking notification
+            subprocess.run(
+                ["notify-send",
+                 "--app-name=remnd",
+                 "--hint=string:x-canonical-private-synchronous:remnd-{}".format(r["id"]),
+                 "--urgency=normal",
+                 title, body],
+                check=False,
+            )
+        else:
+            # Fallback to stdout if libnotify isn’t installed
+            print(f"[DUE #{r['id']}] {title} — {body}")
+
+        mark_notified(int(r["id"]))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -107,6 +207,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_comp(args)
     elif args.cmd == "del":
         return cmd_del(args)
+    elif args.cmd == "notify-due":
+        return cmd_notify_due()
+    elif args.cmd == "install-timer":
+        return cmd_install_timer()
+    elif args.cmd == "uninstall-timer":
+        return cmd_uninstall_timer()
     else:
         parser.error("unknown command")  # pragma: no cover
 
