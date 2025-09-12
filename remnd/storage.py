@@ -107,3 +107,17 @@ def mark_notified(reminder_id: int) -> bool:
         )
         return cur.rowcount > 0
 
+
+def due_active(limit: int = 500):
+    """All active (not completed) reminders that are already due, regardless of notified_at."""
+    now = int(time.time())
+    with connect() as conn:
+        return list(conn.execute(
+            "SELECT * FROM reminders "
+            "WHERE completed_at IS NULL "
+            "  AND due_at <= ? "
+            "ORDER BY due_at ASC, id ASC "
+            "LIMIT ?",
+            (now, limit),
+        ))
+

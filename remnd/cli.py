@@ -10,7 +10,7 @@ import textwrap
 
 from .storage import (
     add_reminder, delete_reminder, list_reminders, mark_complete,
-    due_unnotified, mark_notified,
+    due_unnotified, mark_notified, due_active
 )
 
 
@@ -43,32 +43,67 @@ WantedBy=default.target
 """
 
 
+CATCHUP_SERVICE = "remnd-catchup.service"
+CATCHUP_TIMER = "remnd-catchup.timer"
+
+
+CATCHUP_SERVICE_UNIT = textwrap.dedent(f"""\
+[Unit]
+Description=Re-notify all due, uncompleted remnd reminders at login
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart={shutil.which("remnd") or "%h/.local/bin/remnd"} notify-catchup
+""")
+
+
+CATCHUP_TIMER_UNIT = """\
+[Unit]
+Description=Run remnd catch-up once shortly after user login
+
+[Timer]
+OnActiveSec=5s
+AccuracySec=1s
+Unit=remnd-catchup.service
+Persistent=false
+
+[Install]
+WantedBy=default.target
+"""
+
+
 def _systemctl_user(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["systemctl", "--user", *args], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
 
-def cmd_install_timer() -> int:
+def cmd_install() -> int:
     SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
     (SYSTEMD_DIR / SERVICE_NAME).write_text(SERVICE_UNIT)
     (SYSTEMD_DIR / TIMER_NAME).write_text(TIMER_UNIT)
-
+    (SYSTEMD_DIR / CATCHUP_SERVICE).write_text(CATCHUP_SERVICE_UNIT)
+    (SYSTEMD_DIR / CATCHUP_TIMER).write_text(CATCHUP_TIMER_UNIT)
     _systemctl_user("daemon-reload")
     _systemctl_user("enable", "--now", TIMER_NAME)
-
-    print("✓ Installed and started remnd timer (checks every minute).")
+    _systemctl_user("enable", "--now", CATCHUP_TIMER)
+    print(u'\u2705' + " Installed: minute timer and login catch-up.")
     print("  To check status:  systemctl --user status remnd-notify.timer")
     return 0
 
 
-def cmd_uninstall_timer() -> int:
+def cmd_uninstall() -> int:
     _systemctl_user("disable", "--now", TIMER_NAME)
+    _systemctl_user("disable", "--now", CATCHUP_TIMER)
     try:
         (SYSTEMD_DIR / SERVICE_NAME).unlink(missing_ok=True)
         (SYSTEMD_DIR / TIMER_NAME).unlink(missing_ok=True)
+        (SYSTEMD_DIR / CATCHUP_SERVICE).unlink(missing_ok=True)
+        (SYSTEMD_DIR / CATCHUP_TIMER).unlink(missing_ok=True)
     except Exception:
         pass
     _systemctl_user("daemon-reload")
-    print("✓ Uninstalled remnd timer.")
+    print(u'\u2705' + " Uninstalled remnd timer and login catch-up.")
     return 0
 
 
@@ -103,8 +138,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("notify-due", help="Send desktop notifications for due reminders.")
-    sub.add_parser("install-timer", help="Install and start the systemd user timer.")
-    sub.add_parser("uninstall-timer", help="Disable and remove the systemd user timer.")
+    sub.add_parser("notify-catchup", help="Re-notify all due, uncompleted reminders (once per login).")
+    sub.add_parser("install", help="Install and start the systemd user timer and login catch-up.")
+    sub.add_parser("uninstall", help="Disable and remove the systemd user timer and login catch-up.")
 
     p_add = sub.add_parser("add", help="Add a reminder due after a duration.")
     p_add.add_argument("in_", help='Duration like "10m", "1h30m", or number (minutes).')
@@ -127,7 +163,7 @@ def cmd_add(args) -> int:
     delta = _parse_duration(args.in_)
     due = dt.datetime.now() + delta
     rid = add_reminder(title=args.title, note=args.note, due_at=_to_epoch_utc(due))
-    print(f"added #{rid} @ {due.strftime('%Y-%m-%d %H:%M:%S')}  {args.title}")
+    print(f"Added #{rid} @ {due.strftime('%Y-%m-%d %H:%M:%S')}  {args.title}")
     return 0
 
 
@@ -150,48 +186,47 @@ def cmd_list(args) -> int:
 def cmd_comp(args) -> int:
     ok = mark_complete(args.id)
     if ok:
-        print(f"marked #{args.id} as done")
+        print(f"Marked #{args.id} as done")
         return 0
-    print(f"no active reminder #{args.id} (maybe already done or wrong id)")
+    print(f"No active reminder #{args.id} (maybe already done or wrong id)")
     return 1
 
 
 def cmd_del(args) -> int:
     ok = delete_reminder(args.id)
     if ok:
-        print(f"deleted #{args.id}")
+        print(f"Deleted #{args.id}")
         return 0
-    print(f"no reminder #{args.id}")
+    print(f"No reminder #{args.id}")
     return 1
+
+
+def _send_notification(title: str, body: str, *, replace_key: str | None = None) -> None:
+    if shutil.which("notify-send") is None:
+        print(f"[NOTIFY] {title} — {body}")
+        return
+    cmd = ["notify-send", "--app-name=remnd", "--urgency=normal"]
+    if replace_key:
+        cmd += ["--hint", f"string:x-canonical-private-synchronous:{replace_key}"]
+    cmd += [title, body]
+    subprocess.run(cmd, check=False)
 
 
 def cmd_notify_due() -> int:
     rows = due_unnotified()
-    if not rows:
-        return 0
-
-    has_notify = shutil.which("notify-send") is not None
     for r in rows:
-        title = r["title"] or "Reminder"
-        note = r["note"] or ""
         due_local = dt.datetime.fromtimestamp(int(r["due_at"])).strftime("%Y-%m-%d %H:%M")
-        body = note if note else f"Due: {due_local}"
-
-        if has_notify:
-            # Send a transient, non-stacking notification
-            subprocess.run(
-                ["notify-send",
-                 "--app-name=remnd",
-                 "--hint=string:x-canonical-private-synchronous:remnd-{}".format(r["id"]),
-                 "--urgency=normal",
-                 title, body],
-                check=False,
-            )
-        else:
-            # Fallback to stdout if libnotify isn’t installed
-            print(f"[DUE #{r['id']}] {title} — {body}")
-
+        _send_notification(r["title"] or "Reminder", (r["note"] or f"Due: {due_local}"), replace_key=f"remnd-{r['id']}")
         mark_notified(int(r["id"]))
+    return 0
+
+
+def cmd_notify_catchup() -> int:
+    rows = due_active()
+    for r in rows:
+        due_local = dt.datetime.fromtimestamp(int(r["due_at"])).strftime("%Y-%m-%d %H:%M")
+        # No replace_key here → always show a new toast at login
+        _send_notification(r["title"] or "Reminder", (r["note"] or f"Due: {due_local}"))
     return 0
 
 
@@ -209,10 +244,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_del(args)
     elif args.cmd == "notify-due":
         return cmd_notify_due()
-    elif args.cmd == "install-timer":
-        return cmd_install_timer()
-    elif args.cmd == "uninstall-timer":
-        return cmd_uninstall_timer()
+    elif args.cmd == "notify-catchup":
+        return cmd_notify_catchup()
+    elif args.cmd == "install":
+        return cmd_install()
+    elif args.cmd == "uninstall":
+        return cmd_uninstall()
     else:
         parser.error("unknown command")  # pragma: no cover
 
