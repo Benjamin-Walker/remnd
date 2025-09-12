@@ -3,6 +3,8 @@ import os
 import sqlite3
 import time
 from pathlib import Path
+import datetime as _dt
+import calendar as _cal
 
 
 APP_DIR = Path(os.getenv("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "remnd"
@@ -17,7 +19,11 @@ CREATE TABLE IF NOT EXISTS reminders (
     due_at INTEGER NOT NULL,    -- epoch seconds (UTC)
     created_at INTEGER NOT NULL,
     notified_at INTEGER,
-    completed_at INTEGER        -- NULL if not completed, else epoch seconds (UTC)
+    completed_at INTEGER,       -- NULL if not completed, else epoch seconds (UTC)
+
+    -- Repeat fields (NULL = not repeating)
+    repeat_every INTEGER,       -- positive integer
+    repeat_unit TEXT            -- one of: seconds, minutes, hours, days, weeks, months
 );
 CREATE INDEX IF NOT EXISTS idx_due_at ON reminders(due_at);
 """
@@ -38,12 +44,20 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
-def add_reminder(*, title: str, note: str | None, due_at: int) -> int:
+def add_reminder(
+    *,
+    title: str,
+    note: str | None,
+    due_at: int,
+    repeat_every: int | None = None,
+    repeat_unit: str | None = None
+) -> int:
     now = int(time.time())
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO reminders(title, note, due_at, created_at) VALUES(?,?,?,?)",
-            (title, note, due_at, now),
+            "INSERT INTO reminders(title, note, due_at, created_at, repeat_every, repeat_unit) "
+            "VALUES(?,?,?,?,?,?)",
+            (title, note, due_at, now, repeat_every, repeat_unit),
         )
         return int(cur.lastrowid)
 
@@ -51,13 +65,11 @@ def add_reminder(*, title: str, note: str | None, due_at: int) -> int:
 def list_reminders(*, include_done: bool = False):
     with connect() as conn:
         if include_done:
-            # Show everything, done first by completion time, then due_at
             return list(conn.execute(
                 "SELECT * FROM reminders ORDER BY "
                 "CASE WHEN completed_at IS NULL THEN 0 ELSE 1 END, "
                 "due_at ASC, id ASC"
             ))
-        # Default: only active (not completed)
         return list(conn.execute(
             "SELECT * FROM reminders "
             "WHERE completed_at IS NULL "
@@ -65,20 +77,45 @@ def list_reminders(*, include_done: bool = False):
         ))
 
 
-def mark_complete(reminder_id: int) -> bool:
-    now = int(time.time())
+def get_reminder(reminder_id: int):
     with connect() as conn:
-        cur = conn.execute(
-            "UPDATE reminders SET completed_at=? WHERE id=? AND completed_at IS NULL",
-            (now, reminder_id),
-        )
-        return cur.rowcount > 0
+        cur = conn.execute("SELECT * FROM reminders WHERE id=?", (reminder_id,))
+        return cur.fetchone()
 
 
 def delete_reminder(reminder_id: int) -> bool:
     with connect() as conn:
         cur = conn.execute("DELETE FROM reminders WHERE id=?", (reminder_id,))
         return cur.rowcount > 0
+
+
+def mark_complete(reminder_id: int) -> bool:
+    """
+    For repeating reminders: roll the due date forward one interval, reset notified/completed.
+    For non-repeating: set completed_at.
+    Returns True if something changed.
+    """
+    now = int(time.time())
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM reminders WHERE id=? AND completed_at IS NULL", (reminder_id,)).fetchone()
+        if not row:
+            return False
+
+        rep_every = row["repeat_every"]
+        rep_unit = row["repeat_unit"]
+        if rep_every and rep_unit:
+            next_due = _advance_due(int(row["due_at"]), rep_every, rep_unit)
+            cur = conn.execute(
+                "UPDATE reminders SET due_at=?, notified_at=NULL, completed_at=NULL WHERE id=?",
+                (next_due, reminder_id),
+            )
+            return cur.rowcount > 0
+        else:
+            cur = conn.execute(
+                "UPDATE reminders SET completed_at=? WHERE id=? AND completed_at IS NULL",
+                (now, reminder_id),
+            )
+            return cur.rowcount > 0
 
 
 def due_unnotified(limit: int = 100):
@@ -136,4 +173,34 @@ def due_active(limit: int = 500):
             "LIMIT ?",
             (now, limit),
         ))
+
+
+def _advance_due(due_at_epoch: int, every: int, unit: str) -> int:
+    dt = _dt.datetime.fromtimestamp(int(due_at_epoch), tz=_dt.timezone.utc)
+    unit = unit.lower()
+    if unit == "seconds":
+        dt += _dt.timedelta(seconds=every)
+    elif unit == "minutes":
+        dt += _dt.timedelta(minutes=every)
+    elif unit == "hours":
+        dt += _dt.timedelta(hours=every)
+    elif unit == "days":
+        dt += _dt.timedelta(days=every)
+    elif unit == "weeks":
+        dt += _dt.timedelta(weeks=every)
+    elif unit == "months":
+        dt = _add_months(dt, every)
+    else:
+        raise ValueError(f"unknown repeat unit: {unit}")
+    return int(dt.timestamp())
+
+
+def _add_months(dt: _dt.datetime, months: int) -> _dt.datetime:
+    # Calendar-aware month addition (timezone preserved)
+    year = dt.year + (dt.month - 1 + months) // 12
+    month = (dt.month - 1 + months) % 12 + 1
+    # clamp day to last day of target month
+    last_day = _cal.monthrange(year, month)[1]
+    day = min(dt.day, last_day)
+    return dt.replace(year=year, month=month, day=day)
 
