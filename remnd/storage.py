@@ -96,13 +96,29 @@ def due_unnotified(limit: int = 100):
         ))
 
 
+def due_renotify(interval_seconds: int = 24 * 60 * 60, limit: int = 500):
+    """Active reminders that are due and were notified before the given interval."""
+    now = int(time.time())
+    threshold = now - interval_seconds
+    with connect() as conn:
+        return list(conn.execute(
+            "SELECT * FROM reminders "
+            "WHERE completed_at IS NULL "
+            "  AND due_at <= ? "
+            "  AND notified_at IS NOT NULL "
+            "  AND notified_at > 0 "
+            "  AND notified_at <= ? "
+            "ORDER BY due_at ASC, id ASC "
+            "LIMIT ?",
+            (now, threshold, limit),
+        ))
+
+
 def mark_notified(reminder_id: int) -> bool:
     now = int(time.time())
     with connect() as conn:
         cur = conn.execute(
-            "UPDATE reminders "
-            "SET notified_at = ? "
-            "WHERE id = ? AND (notified_at IS NULL OR notified_at = 0)",
+            "UPDATE reminders SET notified_at = ? WHERE id = ?",
             (now, reminder_id),
         )
         return cur.rowcount > 0

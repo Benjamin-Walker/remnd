@@ -10,16 +10,16 @@ import textwrap
 
 from .storage import (
     add_reminder, delete_reminder, list_reminders, mark_complete,
-    due_unnotified, mark_notified, due_active
+    due_unnotified, mark_notified, due_active, due_renotify
 )
 
 
 SYSTEMD_DIR = Path.home() / ".config" / "systemd" / "user"
-SERVICE_NAME = "remnd-notify.service"
-TIMER_NAME = "remnd-notify.timer"
+NOTIFY_SERVICE = "remnd-notify.service"
+NOTIFY_TIMER = "remnd-notify.timer"
 
 
-SERVICE_UNIT = textwrap.dedent(f"""\
+NOTIFY_SERVICE_UNIT = textwrap.dedent(f"""\
 [Unit]
 Description=Send notifications for due remnd reminders
 
@@ -29,7 +29,7 @@ ExecStart={shutil.which("remnd") or "%h/.local/bin/remnd"} notify-due
 """)
 
 
-TIMER_UNIT = """\
+NOTIFY_TIMER_UNIT = """\
 [Unit]
 Description=Check for due remnd reminders every minute
 
@@ -74,36 +74,69 @@ WantedBy=default.target
 """
 
 
+RENOTIFY_SERVICE = "remnd-renotify.service"
+RENOTIFY_TIMER = "remnd-renotify.timer"
+
+
+RENOTIFY_SERVICE_UNIT = textwrap.dedent(f"""\
+[Unit]
+Description=Re-notify overdue remnd reminders
+
+[Service]
+Type=oneshot
+ExecStart={shutil.which("remnd") or "%h/.local/bin/remnd"} notify-renotify
+""")
+
+
+RENOTIFY_TIMER_UNIT = """\
+[Unit]
+Description=Check for overdue remnd reminders every hour
+
+[Timer]
+OnCalendar=*:0/60
+Persistent=true
+Unit=remnd-renotify.service
+
+[Install]
+WantedBy=default.target
+"""
+
+
 def _systemctl_user(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["systemctl", "--user", *args], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
 
 def cmd_install() -> int:
     SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
-    (SYSTEMD_DIR / SERVICE_NAME).write_text(SERVICE_UNIT)
-    (SYSTEMD_DIR / TIMER_NAME).write_text(TIMER_UNIT)
+    (SYSTEMD_DIR / NOTIFY_SERVICE).write_text(NOTIFY_SERVICE_UNIT)
+    (SYSTEMD_DIR / NOTIFY_TIMER).write_text(NOTIFY_TIMER_UNIT)
     (SYSTEMD_DIR / CATCHUP_SERVICE).write_text(CATCHUP_SERVICE_UNIT)
     (SYSTEMD_DIR / CATCHUP_TIMER).write_text(CATCHUP_TIMER_UNIT)
+    (SYSTEMD_DIR / RENOTIFY_SERVICE).write_text(RENOTIFY_SERVICE_UNIT)
+    (SYSTEMD_DIR / RENOTIFY_TIMER).write_text(RENOTIFY_TIMER_UNIT)
     _systemctl_user("daemon-reload")
-    _systemctl_user("enable", "--now", TIMER_NAME)
+    _systemctl_user("enable", "--now", NOTIFY_TIMER)
     _systemctl_user("enable", "--now", CATCHUP_TIMER)
-    print(u'\u2705' + " Installed: minute timer and login catch-up.")
-    print("  To check status:  systemctl --user status remnd-notify.timer")
+    _systemctl_user("enable", "--now", RENOTIFY_TIMER)
+    print(u'\u2705' + " Installed: notifier, renotifier, and login catch-up.")
     return 0
 
 
 def cmd_uninstall() -> int:
-    _systemctl_user("disable", "--now", TIMER_NAME)
+    _systemctl_user("disable", "--now", NOTIFY_TIMER)
     _systemctl_user("disable", "--now", CATCHUP_TIMER)
+    _systemctl_user("disable", "--now", RENOTIFY_TIMER)
     try:
         (SYSTEMD_DIR / SERVICE_NAME).unlink(missing_ok=True)
-        (SYSTEMD_DIR / TIMER_NAME).unlink(missing_ok=True)
+        (SYSTEMD_DIR / NOTIFY_TIMER).unlink(missing_ok=True)
         (SYSTEMD_DIR / CATCHUP_SERVICE).unlink(missing_ok=True)
         (SYSTEMD_DIR / CATCHUP_TIMER).unlink(missing_ok=True)
+        (SYSTEMD_DIR / RENOTIFY_SERVICE).unlink(missing_ok=True)
+        (SYSTEMD_DIR / RENOTIFY_TIMER).unlink(missing_ok=True)
     except Exception:
         pass
     _systemctl_user("daemon-reload")
-    print(u'\u2705' + " Uninstalled remnd timer and login catch-up.")
+    print(u'\u2705' + " Uninstalled notifier, renotifier, and login catch-up.")
     return 0
 
 
@@ -139,6 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("notify-due", help="Send desktop notifications for due reminders.")
     sub.add_parser("notify-catchup", help="Re-notify all due, uncompleted reminders (once per login).")
+    sub.add_parser("notify-renotify", help="Re-notify all overdue, uncompleted reminders (once per hour).")
     sub.add_parser("install", help="Install and start the systemd user timer and login catch-up.")
     sub.add_parser("uninstall", help="Disable and remove the systemd user timer and login catch-up.")
 
@@ -230,6 +264,15 @@ def cmd_notify_catchup() -> int:
     return 0
 
 
+def cmd_notify_renotify() -> int:
+    rows = due_renotify()
+    for r in rows:
+        due_local = dt.datetime.fromtimestamp(int(r["due_at"])).strftime("%Y-%m-%d %H:%M")
+        _send_notification(r["title"] or "Reminder", (r["note"] or f"Due: {due_local}"), replace_key=f"remnd-{r['id']}")
+        mark_notified(int(r["id"]))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -246,6 +289,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_notify_due()
     elif args.cmd == "notify-catchup":
         return cmd_notify_catchup()
+    elif args.cmd == "notify-renotify":
+        return cmd_notify_renotify()
     elif args.cmd == "install":
         return cmd_install()
     elif args.cmd == "uninstall":
