@@ -348,7 +348,8 @@ def cmd_list(args) -> int:
         return 0
 
     print(f"{'ID':>4}  {'Due (local)':<19}  {'Title':<20}  {'Done':<5}  {'Note'}")
-    print("-" * 80)
+    line_width = min(shutil.get_terminal_size(fallback=(80, 20)).columns, 80)
+    print("-" * line_width)
     for r in rows:
         due_local = dt.datetime.fromtimestamp(int(r["due_at"])).strftime("%d-%m-%Y %H:%M:%S")
         title = (r["title"] or "Reminder")[:20]
