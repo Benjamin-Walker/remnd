@@ -1,4 +1,4 @@
-rom __future__ import annotations
+from __future__ import annotations
 import argparse
 import datetime as dt
 import re
@@ -197,8 +197,46 @@ def _parse_repeat_every(spec: str) -> tuple[int, str]:
     return n, unit
 
 
+def _parse_due_at(spec: str) -> dt.datetime:
+    """
+    Accepts local date/time like:
+      - 'YYYY-MM-DD HH:MM' or 'YYYY-MM-DD HH:MM:SS'
+      - 'YYYY-MM-DD' (assumes 09:00)
+      - 'today HH:MM' / 'tomorrow HH:MM'
+      - 'HH:MM' (today at HH:MM, or tomorrow if already passed)
+    Returns a naive local datetime (treated as local time by _to_epoch_utc).
+    """
+    s = spec.strip().lower()
+    now = dt.datetime.now()
+
+    m = re.fullmatch(r"(today|tomorrow)\s+(\d{1,2}):(\d{2})(?::(\d{2}))?", s)
+    if m:
+        day_word, hh, mm, ss = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4) or 0)
+        base = now.date() if day_word == "today" else (now + dt.timedelta(days=1)).date()
+        return dt.datetime.combine(base, dt.time(hh, mm, ss))
+
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})(?:[ t](\d{1,2}):(\d{2})(?::(\d{2}))?)?", s)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if m.group(4):
+            hh, mm, ss = int(m.group(4)), int(m.group(5)), int(m.group(6) or 0)
+        else:
+            hh, mm, ss = 9, 0, 0
+        return dt.datetime(y, mo, d, hh, mm, ss)
+
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", s)
+    if m:
+        hh, mm, ss = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+        candidate = now.replace(hour=hh, minute=mm, second=ss, microsecond=0)
+        if candidate <= now:
+            candidate += dt.timedelta(days=1)
+        return candidate
+
+    raise ValueError('Invalid date/time. Try "YYYY-MM-DD HH:MM", "today 18:00", "tomorrow 09:15", or "21:00".')
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="remnd", description="Simple reminder list (add, list, comp, del).")
+    p = argparse.ArgumentParser(prog="remnd", description="Simple reminder list (in, at, list, comp, del).")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("notify-due", help="Send desktop notifications for due reminders.")
@@ -207,11 +245,17 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("install", help="Install and start the systemd user timer and login catch-up.")
     sub.add_parser("uninstall", help="Disable and remove the systemd user timer and login catch-up.")
 
-    p_add = sub.add_parser("add", help="Add a reminder due after a duration.")
-    p_add.add_argument("in_", help='Duration like "10m", "1h30m", or number (minutes).')
+    p_add = sub.add_parser("in", help="Add a reminder in <duration>.")
+    p_add.add_argument("when", help="Duration.")
     p_add.add_argument("title", help="Reminder title.")
     p_add.add_argument("--note", "-n", help='Optional note (default "-").')
-    p_add.add_argument("--every", "-e", help='Optional repeat interval like "2h", "3d", "1w".')
+    p_add.add_argument("--every", "-e", help='Optional repeat interval like "2h", "3d", "1w", "1mo".')
+
+    p_add_at = sub.add_parser("at", help="Add a reminder at <datetime>.")
+    p_add_at.add_argument("when", help="Datetime.")
+    p_add_at.add_argument("title", help="Reminder title.")
+    p_add_at.add_argument("--note", "-n", help='Optional note (default "-").')
+    p_add_at.add_argument("--every", "-e", help='Optional repeat interval like "2h", "3d", "1w", "1mo".')
 
     p_list = sub.add_parser("list", help="List reminders")
     p_list.add_argument("--all", action="store_true", help="Include completed reminders.")
@@ -226,8 +270,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_add(args) -> int:
-    delta = _parse_duration(args.in_)
-    due = dt.datetime.now() + delta
+    if args.cmd == "in":
+        delta = _parse_duration(args.when)
+        due = dt.datetime.now() + delta
+    else:  # args.cmd == "at"
+        due = _parse_due_at(args.when)
 
     repeat_every = None
     repeat_unit = None
@@ -242,10 +289,7 @@ def cmd_add(args) -> int:
         repeat_unit=repeat_unit,
     )
 
-    suffix = ""
-    if repeat_every and repeat_unit:
-        suffix = f"  (repeats every {repeat_every} {repeat_unit})"
-
+    suffix = f"  (repeats every {repeat_every} {repeat_unit})" if repeat_every and repeat_unit else ""
     print(f"Added #{rid} @ {due.strftime('%Y-%m-%d %H:%M:%S')}  {args.title}{suffix}")
     return 0
 
@@ -426,7 +470,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.cmd == "add":
+    if args.cmd == "in" or args.cmd == "at":
         return cmd_add(args)
     elif args.cmd == "list":
         return cmd_list(args)
