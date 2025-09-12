@@ -235,40 +235,129 @@ def cmd_del(args) -> int:
     return 1
 
 
-def _send_notification(title: str, body: str, *, replace_key: str | None = None) -> None:
+def _send_notification(
+    title: str,
+    body: str,
+    *,
+    replace_key: str | None = None,
+    icon: str | None = None,
+    urgency: str = "normal",   # "low" | "normal" | "critical"
+    expire_ms: int | None = None,
+) -> None:
+    """
+    Pretty libnotify toast via notify-send with:
+      - themed or file icon
+      - urgency levels
+      - multiline Pango markup body
+      - per-ID replacement to collapse duplicates
+    """
     if shutil.which("notify-send") is None:
-        print(f"[NOTIFY] {title} — {body}")
+        print(f"[NOTIFY:{urgency}] {title} — {body}")
         return
-    cmd = ["notify-send", "--app-name=remnd", "--urgency=normal"]
+
+    cmd = ["notify-send", "--app-name=remnd", f"--urgency={urgency}"]
+
+    if icon:
+        cmd += ["--icon", icon]  # e.g. 'alarm', 'appointment-soon', or absolute path
+    if expire_ms is not None:
+        cmd += ["--expire-time", str(expire_ms)]
     if replace_key:
+        # Collapse repeated notifications for the same reminder ID
         cmd += ["--hint", f"string:x-canonical-private-synchronous:{replace_key}"]
+
+    # Helps some daemons theme/style it
+    cmd += ["--category=reminder"]
+
+    # Title should be plain; body may use small Pango markup.
     cmd += [title, body]
     subprocess.run(cmd, check=False)
 
 
+
 def cmd_notify_due() -> int:
     rows = due_unnotified()
+    now = dt.datetime.now().timestamp()
+
     for r in rows:
-        due_local = dt.datetime.fromtimestamp(int(r["due_at"])).strftime("%Y-%m-%d %H:%M")
-        _send_notification(r["title"] or "Reminder", (r["note"] or f"Due: {due_local}"), replace_key=f"remnd-{r['id']}")
+        due_ts = int(r["due_at"])
+        overdue_s = int(now - due_ts)
+        due_local = dt.datetime.fromtimestamp(due_ts).strftime("%a %d %b • %H:%M")
+
+        title = f"{r['title'] or 'Reminder'}"
+        note = (r["note"] or "").strip()
+
+        body_lines = [f"{due_local}"]
+        if note:
+            body_lines.append(note)
+        body_lines.append(f"<span size='small' alpha='70%'>ID #{r['id']}</span>")
+        body = "\n".join(body_lines)
+
+        urgency = "normal" if overdue_s < 48 * 3600 else "critical"
+
+        _send_notification(
+            title,
+            body,
+            icon="appointment-soon",   # or your PNG path
+            replace_key=f"remnd-{r['id']}",
+            urgency=urgency,
+        )
         mark_notified(int(r["id"]))
     return 0
 
 
 def cmd_notify_catchup() -> int:
     rows = due_active()
+
     for r in rows:
-        due_local = dt.datetime.fromtimestamp(int(r["due_at"])).strftime("%Y-%m-%d %H:%M")
-        # No replace_key here → always show a new toast at login
-        _send_notification(r["title"] or "Reminder", (r["note"] or f"Due: {due_local}"))
+        due_local = dt.datetime.fromtimestamp(int(r["due_at"])).strftime("%a %d %b • %H:%M")
+        title = f"{r['title'] or 'Reminder'}"
+        note = (r["note"] or "").strip()
+
+        body_lines = [f"{due_local}"]
+        if note:
+            body_lines.append(note)
+        body_lines.append(f"<span size='small' alpha='70%'>ID #{r['id']}</span>")
+        body = "\n".join(body_lines)
+
+        # Fresh toast at login; keep it gentle and short-lived
+        _send_notification(
+            title,
+            body,
+            icon="appointment-soon",
+            urgency="low",
+            expire_ms=8000,
+        )
     return 0
 
 
 def cmd_notify_renotify() -> int:
     rows = due_renotify()
+    now = dt.datetime.now().timestamp()
+
     for r in rows:
-        due_local = dt.datetime.fromtimestamp(int(r["due_at"])).strftime("%Y-%m-%d %H:%M")
-        _send_notification(r["title"] or "Reminder", (r["note"] or f"Due: {due_local}"), replace_key=f"remnd-{r['id']}")
+        due_ts = int(r["due_at"])
+        overdue_s = int(now - due_ts)
+        due_local = dt.datetime.fromtimestamp(due_ts).strftime("%a %d %b • %H:%M")
+
+        title = f"{r['title'] or 'Reminder'}"
+        note = (r["note"] or "").strip()
+
+        body_lines = [f"{due_local}"]
+        if note:
+            body_lines.append(note)
+        body_lines.append(f"<span size='small' alpha='70%'>ID #{r['id']}</span>")
+        body = "\n".join(body_lines)
+
+        urgency = "normal" if overdue_s < 48 * 3600 else "critical"
+
+        _send_notification(
+            title,
+            body,
+            replace_key=f"remnd-{r['id']}",
+            icon="appointment-soon",   # or your PNG path
+            urgency=urgency,
+            expire_ms=15000,
+        )
         mark_notified(int(r["id"]))
     return 0
 
