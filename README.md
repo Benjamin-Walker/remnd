@@ -7,7 +7,7 @@ Built for Linux with `systemd` + `notify-send`.
 
 ## Features
 
-- Add reminders due after a duration (`10m`, `1h30m`, `2d`, …).
+- Add reminders due after a duration (`10m`, `1h30m`, `2d`, …) or at a specific time (`14:30`, `2024-12-31 23:59`, …).
 - Desktop toast notifications when reminders are due.
 - Auto-repeat reminders (every X minutes/hours/days/weeks/months).
 - Mark reminders complete; repeating ones roll forward automatically.
