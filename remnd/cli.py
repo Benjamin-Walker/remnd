@@ -200,30 +200,57 @@ def _parse_repeat_every(spec: str) -> tuple[int, str]:
 def _parse_due_at(spec: str) -> dt.datetime:
     """
     Accepts local date/time like:
-      - 'YYYY-MM-DD HH:MM' or 'YYYY-MM-DD HH:MM:SS'
-      - 'YYYY-MM-DD' (assumes 09:00)
-      - 'today HH:MM' / 'tomorrow HH:MM'
-      - 'HH:MM' (today at HH:MM, or tomorrow if already passed)
-    Returns a naive local datetime (treated as local time by _to_epoch_utc).
+      - 'DD-MM-YYYY HH:MM[:SS]'
+      - 'DD-MM-YY HH:MM[:SS]'   (YY -> 20YY)
+      - 'DD-MM HH:MM[:SS]'      (year defaults to current year)
+      - 'DD-MM-YYYY' / 'DD-MM-YY' / 'DD-MM' (time defaults to 09:00)
+      - 'today HH:MM[:SS]' / 'tomorrow HH:MM[:SS]'
+      - 'HH:MM[:SS]' (today, or tomorrow if already passed)
+    Returns a naive local datetime.
     """
     s = spec.strip().lower()
     now = dt.datetime.now()
 
+    # today/tomorrow HH:MM[:SS]
     m = re.fullmatch(r"(today|tomorrow)\s+(\d{1,2}):(\d{2})(?::(\d{2}))?", s)
     if m:
         day_word, hh, mm, ss = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4) or 0)
         base = now.date() if day_word == "today" else (now + dt.timedelta(days=1)).date()
         return dt.datetime.combine(base, dt.time(hh, mm, ss))
 
-    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})(?:[ t](\d{1,2}):(\d{2})(?::(\d{2}))?)?", s)
+    # DD-MM-YYYY [HH:MM[:SS]]
+    m = re.fullmatch(r"(\d{1,2})-(\d{1,2})-(\d{4})(?:[ t](\d{1,2}):(\d{2})(?::(\d{2}))?)?", s)
     if m:
-        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
         if m.group(4):
             hh, mm, ss = int(m.group(4)), int(m.group(5)), int(m.group(6) or 0)
         else:
             hh, mm, ss = 9, 0, 0
         return dt.datetime(y, mo, d, hh, mm, ss)
 
+    # DD-MM-YY [HH:MM[:SS]]  -> year = 2000 + YY
+    m = re.fullmatch(r"(\d{1,2})-(\d{1,2})-(\d{2})(?:[ t](\d{1,2}):(\d{2})(?::(\d{2}))?)?", s)
+    if m:
+        d, mo, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        y = 2000 + yy
+        if m.group(4):
+            hh, mm, ss = int(m.group(4)), int(m.group(5)), int(m.group(6) or 0)
+        else:
+            hh, mm, ss = 9, 0, 0
+        return dt.datetime(y, mo, d, hh, mm, ss)
+
+    # DD-MM [HH:MM[:SS]]  (current year)
+    m = re.fullmatch(r"(\d{1,2})-(\d{1,2})(?:[ t](\d{1,2}):(\d{2})(?::(\d{2}))?)?", s)
+    if m:
+        d, mo = int(m.group(1)), int(m.group(2))
+        y = now.year
+        if m.group(3):
+            hh, mm, ss = int(m.group(3)), int(m.group(4)), int(m.group(5) or 0)
+        else:
+            hh, mm, ss = 9, 0, 0
+        return dt.datetime(y, mo, d, hh, mm, ss)
+
+    # HH:MM[:SS] → today (or tomorrow if already passed)
     m = re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", s)
     if m:
         hh, mm, ss = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
@@ -232,7 +259,7 @@ def _parse_due_at(spec: str) -> dt.datetime:
             candidate += dt.timedelta(days=1)
         return candidate
 
-    raise ValueError('Invalid date/time. Try "YYYY-MM-DD HH:MM", "today 18:00", "tomorrow 09:15", or "21:00".')
+    raise ValueError('Invalid date/time. Try "25-12-2025 14:30", "25-12-25 14:30", "25-12 14:30", "today 18:00", or "21:00".')
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -245,13 +272,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("install", help="Install and start the systemd user timer and login catch-up.")
     sub.add_parser("uninstall", help="Disable and remove the systemd user timer and login catch-up.")
 
-    p_add = sub.add_parser("in", help="Add a reminder in <duration>.")
+    p_add = sub.add_parser("in", help="Add a reminder in <duration> from now (e.g. 10m, 1h30m, 2d).")
     p_add.add_argument("when", help="Duration.")
     p_add.add_argument("title", help="Reminder title.")
     p_add.add_argument("--note", "-n", help='Optional note (default "-").')
     p_add.add_argument("--every", "-e", help='Optional repeat interval like "2h", "3d", "1w", "1mo".')
 
-    p_add_at = sub.add_parser("at", help="Add a reminder at <datetime>.")
+    p_add_at = sub.add_parser("at", help="Add a reminder at <datetime> (DD-MM[-YY|-YYYY] [HH:MM[:SS]]).")
     p_add_at.add_argument("when", help="Datetime.")
     p_add_at.add_argument("title", help="Reminder title.")
     p_add_at.add_argument("--note", "-n", help='Optional note (default "-").')
@@ -290,7 +317,7 @@ def cmd_add(args) -> int:
     )
 
     suffix = f"  (repeats every {repeat_every} {repeat_unit})" if repeat_every and repeat_unit else ""
-    print(f"Added #{rid} @ {due.strftime('%Y-%m-%d %H:%M:%S')}  {args.title}{suffix}")
+    print(f"Added #{rid} @ {due.strftime('%d-%m-%Y %H:%M:%S')}  {args.title}{suffix}")
     return 0
 
 
@@ -304,7 +331,7 @@ def cmd_comp(args) -> int:
     ok = mark_complete(args.id)
     if ok and rolled:
         after = get_reminder(args.id)
-        next_local = dt.datetime.fromtimestamp(int(after["due_at"])).strftime("%Y-%m-%d %H:%M:%S")
+        next_local = dt.datetime.fromtimestamp(int(after["due_at"])).strftime("%d-%m-%Y %H:%M:%S")
         print(f"Completed occurrence of #{args.id}; next due @ {next_local}")
         return 0
     if ok:
@@ -323,7 +350,7 @@ def cmd_list(args) -> int:
     print(f"{'ID':>4}  {'Due (local)':<19}  {'Title':<20}  {'Done':<5}  {'Note'}")
     print("-" * 80)
     for r in rows:
-        due_local = dt.datetime.fromtimestamp(int(r["due_at"])).strftime("%Y-%m-%d %H:%M:%S")
+        due_local = dt.datetime.fromtimestamp(int(r["due_at"])).strftime("%d-%m-%Y %H:%M:%S")
         title = (r["title"] or "Reminder")[:20]
         status = " " + u'\u2705' if r["completed_at"] is not None else " " + u'\u274C'
         print(f"{r['id']:>4}  {due_local:<19}  {title:<20}  {status:<4}  {r['note']}")
