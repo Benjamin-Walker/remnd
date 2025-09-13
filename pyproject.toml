@@ -6,12 +6,37 @@ authors = [
     {name = "Benjamin Walker",email = "mail@benwalker.co.uk"}
 ]
 readme = "README.md"
-requires-python = ">=3.13"
-dependencies = [
+requires-python = ">=3.8"
+license = {file = "LICENSE"}
+keywords = ["reminder", "cli", "notifications"]
+dependencies = []
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+
+  "Operating System :: POSIX :: Linux",
+
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+
+  "Topic :: Utilities",
+  "Topic :: Office/Business :: Scheduling"
 ]
 
 [project.scripts]
 remnd = "remnd.cli:main"
+
+[project.urls]
+Homepage = "http://www.github.com/Benjamin-Walker/remnd"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
